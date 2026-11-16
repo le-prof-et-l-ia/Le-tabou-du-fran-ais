@@ -1,1 +1,60 @@
 @import "tailwindcss";
+
+/* Identité visuelle de leprofetlia.com */
+@theme {
+  --color-ink: #19282c;
+  --color-muted: #59676b;
+  --color-paper: #f7f5ef;
+  --color-cream: #fffdf8;
+  --color-line: #deded5;
+  --color-accent: #db663d;
+  --color-accent-dark: #ae4828;
+  --color-deep: #15383c;
+  --color-deeper: #0e2a2d;
+  --color-mint: #d5e9df;
+  --color-good: #2f8a5b;
+  --color-bad: #c2412d;
+  --font-serif: Georgia, "Times New Roman", serif;
+  --font-sans: Arial, Helvetica, sans-serif;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+kbd {
+  font-family: var(--font-sans);
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.35rem;
+  border: 1px solid currentColor;
+  opacity: 0.75;
+}
+
+:focus-visible {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+details > summary {
+  list-style: none;
+  cursor: pointer;
+}
+details > summary::-webkit-details-marker {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

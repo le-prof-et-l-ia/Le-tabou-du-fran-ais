@@ -7,59 +7,41 @@ import { useState } from 'react';
 import SetupScreen from './components/SetupScreen';
 import GameScreen from './components/GameScreen';
 import ResultScreen from './components/ResultScreen';
-import { GamePhase, Level, Team, AudioAssets } from './types';
+import { GameConfig, GamePhase, QuestionData, Team } from './types';
 
 export default function App() {
   const [phase, setPhase] = useState<GamePhase>('setup');
-  const [level, setLevel] = useState<Level>('A1');
-  const [teams, setTeams] = useState<Team[]>([]);
-  const [words, setWords] = useState<string[]>([]);
-  const [audioAssets, setAudioAssets] = useState<AudioAssets>({});
-  const [apiKeys, setApiKeys] = useState<string[]>([]);
+  const [config, setConfig] = useState<GameConfig | null>(null);
+  const [finalTeams, setFinalTeams] = useState<Team[]>([]);
+  const [missed, setMissed] = useState<QuestionData[]>([]);
+  const [played, setPlayed] = useState<QuestionData[]>([]);
 
-  const handleStartGame = (
-    selectedLevel: Level,
-    newTeams: Team[],
-    importedWords: string[],
-    assets: AudioAssets,
-    customApiKeys: string[]
-  ) => {
-    setLevel(selectedLevel);
-    setTeams(newTeams);
-    setWords(importedWords);
-    setAudioAssets(assets);
-    setApiKeys(customApiKeys);
+  const handleStart = (c: GameConfig) => {
+    setConfig(c);
     setPhase('playing');
+    window.scrollTo(0, 0);
   };
 
-  const handleEndGame = (finalTeams: Team[]) => {
-    setTeams(finalTeams);
+  const handleEnd = (teams: Team[], missedCards: QuestionData[], playedCards: QuestionData[]) => {
+    setFinalTeams(teams);
+    setMissed(missedCards);
+    setPlayed(playedCards);
     setPhase('results');
   };
 
   const handleRestart = () => {
     setPhase('setup');
-    setTeams([]);
-    setWords([]);
+    setFinalTeams([]);
+    setMissed([]);
+    setPlayed([]);
   };
 
   return (
-    <div className="min-h-screen bg-slate-900 text-white font-sans selection:bg-blue-500/30">
-      {phase === 'setup' && (
-        <SetupScreen onStart={handleStartGame} />
-      )}
-      {phase === 'playing' && (
-        <GameScreen 
-          level={level} 
-          teams={teams} 
-          initialWords={words} 
-          audioAssets={audioAssets}
-          apiKeys={apiKeys}
-          onEnd={handleEndGame} 
-        />
-      )}
+    <div className="min-h-screen bg-paper text-ink font-sans selection:bg-accent/25">
+      {phase === 'setup' && <SetupScreen onStart={handleStart} previous={config} />}
+      {phase === 'playing' && config && <GameScreen config={config} onEnd={handleEnd} />}
       {phase === 'results' && (
-        <ResultScreen teams={teams} onRestart={handleRestart} />
+        <ResultScreen teams={finalTeams} missed={missed} played={played} onRestart={handleRestart} />
       )}
     </div>
   );

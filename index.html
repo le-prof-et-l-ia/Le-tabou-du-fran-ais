@@ -1,13 +1,30 @@
 <!doctype html>
-<html lang="en">
+<html lang="fr">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>My Google AI Studio App</title>
+    <title>Le tabou du français — Le Prof et l’IA</title>
+    <meta name="description" content="Jeu de Tabou gratuit pour la classe de FLE : préparez vos cartes avec l’IA de votre choix (ChatGPT, Claude, Le Chat, Gemini…) ou générez-les avec votre clé Gemini, puis jouez en équipes au tableau." />
+    <meta name="theme-color" content="#15383c" />
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <noscript>
+        <main style="max-width:42rem;margin:3rem auto;padding:0 1rem;font-family:Arial,sans-serif;line-height:1.55">
+          <h1>Le tabou du français</h1>
+          <p>Jeu de vocabulaire pour la classe de français langue étrangère, du niveau A1 au niveau C1. Un joueur fait deviner un mot à son équipe sans prononcer les cinq mots interdits de la carte, en 60 secondes.</p>
+          <h2>Préparer les cartes</h2>
+          <ul>
+            <li>Avec l’IA de votre choix (ChatGPT, Claude, Le Chat, Copilot, Gemini) : l’application fournit la consigne à copier, puis lit la réponse collée ou un fichier texte, CSV ou JSON.</li>
+            <li>Avec votre propre clé Gemini : les cartes sont générées dans le navigateur, à partir de votre liste de mots.</li>
+            <li>Les jeux de cartes s’enregistrent dans le navigateur ou se téléchargent pour une prochaine séance.</li>
+          </ul>
+          <h2>Jouer</h2>
+          <p>De une à cinq équipes, chrono de 45 à 120 secondes, raccourcis clavier pour l’animateur, mode plein écran pour le vidéoprojecteur, et à la fin la liste des mots à revoir.</p>
+          <p>Cette application a besoin de JavaScript.</p>
+        </main>
+      </noscript>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

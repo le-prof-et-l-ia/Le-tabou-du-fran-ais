@@ -1,567 +1,488 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
-import { Users, CheckCircle2, XCircle, SkipForward, Play, AlertTriangle } from 'lucide-react';
-import { Level, Team, QuestionData, AudioAssets } from '../types';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
+import { Ban, CheckCircle2, Expand, Flag, Play, RotateCw, Shrink, SkipForward } from 'lucide-react';
+import { AudioAssets, GameConfig, QuestionData, Team } from '../types';
+import { norm, shuffleArray } from '../lib/cards';
+import SiteHeader from './SiteHeader';
 
 interface GameScreenProps {
-  level: Level;
-  teams: Team[];
-  initialWords: string[];
-  audioAssets?: AudioAssets;
-  apiKeys?: string[];
-  onEnd: (teams: Team[]) => void;
+  config: GameConfig;
+  onEnd: (teams: Team[], missed: QuestionData[], played: QuestionData[]) => void;
 }
 
-const TURN_DURATION = 60; // seconds
+type TurnPhase = 'ready' | 'playing' | 'review' | 'turnEnd';
 
-const playBuzzer = (audioAssets?: AudioAssets) => {
-  if (audioAssets?.fail) {
-    new Audio(audioAssets.fail).play().catch(console.error);
-  } else {
-    try {
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioContextClass) return;
-      const audioCtx = new AudioContextClass();
-      if (audioCtx.state === 'suspended') audioCtx.resume();
-      
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(150, audioCtx.currentTime);
-      osc.frequency.exponentialRampToValueAtTime(100, audioCtx.currentTime + 1);
-      
-      osc.connect(gain);
-      gain.connect(audioCtx.destination);
-      
-      osc.start();
-      gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 1);
-      osc.stop(audioCtx.currentTime + 1);
-    } catch (e) { console.error(e) }
+const BATCH_SIZE = 20;
+const MAX_FAILURES = 3;
+
+/* ---------- Sons ---------- */
+let sharedCtx: AudioContext | null = null;
+function tone(type: OscillatorType, from: number, to: number, duration: number, volume: number) {
+  try {
+    const Ctx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!Ctx) return;
+    sharedCtx = sharedCtx || new Ctx();
+    const ctx = sharedCtx;
+    if (ctx.state === 'suspended') ctx.resume();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(from, ctx.currentTime);
+    if (to !== from) osc.frequency.setValueAtTime(to, ctx.currentTime + duration / 3);
+    gain.gain.setValueAtTime(volume, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + duration);
+  } catch (e) {
+    console.error(e);
   }
-};
+}
+const playBuzzer = (a?: AudioAssets) =>
+  a?.fail ? new Audio(a.fail).play().catch(console.error) : tone('sawtooth', 150, 100, 0.8, 0.2);
+const playSuccess = (a?: AudioAssets) =>
+  a?.success ? new Audio(a.success).play().catch(console.error) : tone('sine', 600, 800, 0.3, 0.1);
+const playTick = () => tone('square', 900, 900, 0.05, 0.03);
 
-const playSuccess = (audioAssets?: AudioAssets) => {
-  if (audioAssets?.success) {
-    new Audio(audioAssets.success).play().catch(console.error);
-  } else {
-    try {
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioContextClass) return;
-      const audioCtx = new AudioContextClass();
-      if (audioCtx.state === 'suspended') audioCtx.resume();
-      
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(600, audioCtx.currentTime);
-      osc.frequency.setValueAtTime(800, audioCtx.currentTime + 0.1);
-      
-      osc.connect(gain);
-      gain.connect(audioCtx.destination);
-      
-      osc.start();
-      gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
-      osc.stop(audioCtx.currentTime + 0.3);
-    } catch (e) { console.error(e) }
-  }
-};
+/* ---------- Chrono circulaire ---------- */
+function TimerRing({ remaining, total }: { remaining: number; total: number }) {
+  const r = 44;
+  const c = 2 * Math.PI * r;
+  const ratio = Math.max(0, remaining / total);
+  const color = remaining <= 10 ? 'var(--color-bad)' : remaining <= total / 3 ? 'var(--color-accent)' : 'var(--color-mint)';
+  return (
+    <div className={`relative h-24 w-24 sm:h-28 sm:w-28 ${remaining <= 10 && remaining > 0 ? 'animate-pulse' : ''}`} role="timer" aria-label={`${remaining} secondes restantes`}>
+      <svg viewBox="0 0 100 100" className="h-full w-full -rotate-90">
+        <circle cx="50" cy="50" r={r} fill="none" stroke="rgba(255,255,255,0.12)" strokeWidth="8" />
+        <circle
+          cx="50" cy="50" r={r} fill="none" stroke={color} strokeWidth="8" strokeLinecap="round"
+          strokeDasharray={c} strokeDashoffset={c * (1 - ratio)}
+          style={{ transition: 'stroke-dashoffset 1s linear, stroke 0.3s' }}
+        />
+      </svg>
+      <span className="absolute inset-0 grid place-items-center font-mono text-3xl font-bold text-cream sm:text-4xl">{remaining}</span>
+    </div>
+  );
+}
 
-const shuffleArray = <T,>(arr: T[]): T[] => {
-  const copy = [...arr];
-  for (let i = copy.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [copy[i], copy[j]] = [copy[j], copy[i]];
-  }
-  return copy;
-};
+export default function GameScreen({ config, onEnd }: GameScreenProps) {
+  const { audioAssets, apiKeys, level, turnDuration } = config;
 
-export default function GameScreen({ level, teams: initialTeams, initialWords, audioAssets, apiKeys, onEnd }: GameScreenProps) {
-  const [teams, setTeams] = useState<Team[]>(initialTeams);
+  const [teams, setTeams] = useState<Team[]>(config.teams);
   const [currentTeamIndex, setCurrentTeamIndex] = useState(0);
-  
-  // Shuffle words once at start
-  const [wordsQueue, setWordsQueue] = useState<string[]>(() => shuffleArray(initialWords));
-
-  // Pool of all successfully generated cards for recycling
-  const [cardPool, setCardPool] = useState<QuestionData[]>([]);
-  const [prefetchedCards, setPrefetchedCards] = useState<QuestionData[]>([]);
-  const [isFetching, setIsFetching] = useState(false);
-  const [apiError, setApiError] = useState<string | null>(null);
-  
-  const [isTurnActive, setIsTurnActive] = useState(false);
-  const [isStealPhase, setIsStealPhase] = useState(false);
-  const [isTurnOver, setIsTurnOver] = useState(false);
-  const [timeRemaining, setTimeRemaining] = useState(TURN_DURATION);
-  const [turnScore, setTurnScore] = useState(0);
-  
-  const [missedCards, setMissedCards] = useState<QuestionData[]>([]);
-
   const currentTeam = teams[currentTeamIndex];
-  
-  // prefetchedCards[0] is ALWAYS the card currently being played.
-  const currentCard = prefetchedCards[0] || null;
 
+  // queue[0] est toujours la carte affichée
+  const [queue, setQueue] = useState<QuestionData[]>(() => shuffleArray(config.cards));
+  const [pool, setPool] = useState<QuestionData[]>(config.cards); // toutes les cartes, pour les recycler
+  const [wordsQueue, setWordsQueue] = useState<string[]>(() => shuffleArray(config.words));
+  const [isFetching, setIsFetching] = useState(false);
+  const [failures, setFailures] = useState(0);
+  const [apiError, setApiError] = useState<string | null>(null);
+  const fetchingRef = useRef(false);
+
+  const [phase, setPhase] = useState<TurnPhase>('ready');
+  const [timeRemaining, setTimeRemaining] = useState(turnDuration);
+  const [turnScore, setTurnScore] = useState(0);
+  const [turnMissed, setTurnMissed] = useState<QuestionData[]>([]);
+  const [gameMissed, setGameMissed] = useState<QuestionData[]>([]);
+  const [played, setPlayed] = useState<QuestionData[]>([]);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  const currentCard = queue[0] || null;
+  const generationStopped = failures >= MAX_FAILURES || apiKeys.length === 0;
+
+  /* ---------- Musique de fond ---------- */
   const bgmRef = useRef<HTMLAudioElement | null>(null);
-  const turnStateRef = useRef({ turnScore, missedCards });
-  const prefetchedCardsRef = useRef(prefetchedCards);
-
   useEffect(() => {
-    turnStateRef.current = { turnScore, missedCards };
-  }, [turnScore, missedCards]);
-
-  useEffect(() => {
-    prefetchedCardsRef.current = prefetchedCards;
-  }, [prefetchedCards]);
-
-  // Audio BGM setup
-  useEffect(() => {
-    if (audioAssets?.bgm) {
-      bgmRef.current = new Audio(audioAssets.bgm);
-      bgmRef.current.loop = true;
-      bgmRef.current.volume = 0.1;
-    }
+    if (!audioAssets.bgm) return;
+    const audio = new Audio(audioAssets.bgm);
+    audio.loop = true;
+    audio.volume = 0.1;
+    bgmRef.current = audio;
     return () => {
-      if (bgmRef.current) {
-        bgmRef.current.pause();
-        bgmRef.current.src = '';
-      }
+      audio.pause();
+      audio.src = '';
     };
-  }, [audioAssets?.bgm]);
-
+  }, [audioAssets.bgm]);
   useEffect(() => {
-    if (bgmRef.current) {
-      if (isTurnActive) {
-        bgmRef.current.play().catch(e => console.error("Audio play failed:", e));
-      } else {
-        bgmRef.current.pause();
-      }
-    }
-  }, [isTurnActive]);
+    if (!bgmRef.current) return;
+    if (phase === 'playing') bgmRef.current.play().catch(() => {});
+    else bgmRef.current.pause();
+  }, [phase]);
 
-  // Fetching Logic
+  /* ---------- Génération par Gemini ---------- */
   const fetchBatch = useCallback(async () => {
-    if (isFetching || wordsQueue.length === 0) return;
-    
+    if (fetchingRef.current || wordsQueue.length === 0 || generationStopped) return;
+    fetchingRef.current = true;
     setIsFetching(true);
     setApiError(null);
-    
-    // Fetch 20 words at a time
-    const batchSize = Math.min(20, wordsQueue.length);
-    const targetWords = wordsQueue.slice(0, batchSize);
-    
+    const targetWords = wordsQueue.slice(0, BATCH_SIZE);
     try {
-      const res = await fetch('/api/generate-taboo-batch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          targetWords,
-          level,
-          apiKeys,
-        })
+      // Le SDK Gemini n'est chargé que si l'on génère des cartes.
+      const { generateTabooBatch } = await import('../lib/gemini');
+      const cards = await generateTabooBatch(targetWords, level, apiKeys);
+      setPool((prev) => {
+        const known = new Set(prev.map((c) => norm(c.targetWord)));
+        return [...prev, ...cards.filter((c) => !known.has(norm(c.targetWord)))];
       });
-
-      if (!res.ok) {
-        const errorData = await res.json().catch(() => ({}));
-        throw new Error(errorData.details || errorData.error || `Erreur API: ${res.status}`);
-      }
-      const data = await res.json();
-      
-      if (data.cards && Array.isArray(data.cards)) {
-        const validCards = (data.cards as QuestionData[]).filter(
-          c => c && c.targetWord && Array.isArray(c.tabooWords)
-        );
-
-        setCardPool(prev => {
-          const existingWords = new Set(prev.map(c => c.targetWord.trim().toLowerCase()));
-          const newCards = validCards.filter(
-            c => !existingWords.has(c.targetWord.trim().toLowerCase())
-          );
-          return [...prev, ...newCards];
-        });
-
-        setPrefetchedCards(prev => {
-          const existingWords = new Set(prev.map(c => c.targetWord.trim().toLowerCase()));
-          const newUniqueCards = validCards.filter(
-            c => !existingWords.has(c.targetWord.trim().toLowerCase())
-          );
-          return [...prev, ...newUniqueCards];
-        });
-        setWordsQueue(prev => prev.slice(batchSize));
-      }
+      setQueue((prev) => {
+        const known = new Set(prev.map((c) => norm(c.targetWord)));
+        return [...prev, ...cards.filter((c) => !known.has(norm(c.targetWord)))];
+      });
+      setWordsQueue((prev) => prev.slice(targetWords.length));
+      setFailures(0);
     } catch (error: any) {
       console.error(error);
-      setApiError(error.message || "Erreur de connexion");
-      // Wait 5 seconds before allowing another fetch attempt to prevent spamming
-      await new Promise(r => setTimeout(r, 5000));
+      setApiError(error?.message || 'Erreur de connexion');
+      setFailures((f) => f + 1);
+      await new Promise((r) => setTimeout(r, 4000));
     } finally {
+      fetchingRef.current = false;
       setIsFetching(false);
     }
-  }, [isFetching, wordsQueue, level, apiKeys]);
+  }, [wordsQueue, generationStopped, level, apiKeys]);
 
-  // Auto-fetch or auto-recycle if prefetched list is low
+  // Réapprovisionne la file : d'abord Gemini, sinon on recycle les cartes déjà jouées.
   useEffect(() => {
-    if (prefetchedCards.length < 3) {
-      if (wordsQueue.length > 0 && !isFetching) {
-        fetchBatch();
-      } else if (wordsQueue.length === 0 && initialWords.length > 0) {
-        // Words list is exhausted -> recycle previously generated cards or refill wordsQueue
-        if (cardPool.length > 0) {
-          setPrefetchedCards(prev => {
-            const currentWords = new Set(prev.map(c => c.targetWord.trim().toLowerCase()));
-            const availableToRecycle = cardPool.filter(c => !currentWords.has(c.targetWord.trim().toLowerCase()));
-            
-            if (availableToRecycle.length > 0) {
-              return [...prev, ...shuffleArray(availableToRecycle)];
-            } else {
-              // All cards are currently in queue, append a fresh shuffled copy
-              return [...prev, ...shuffleArray(cardPool)];
-            }
-          });
-        } else if (!isFetching) {
-          // If no cards in pool yet, refill queue with initial words
-          setWordsQueue(shuffleArray(initialWords));
-        }
-      }
+    if (queue.length >= 3) return;
+    if (wordsQueue.length > 0 && !generationStopped) {
+      if (!isFetching) fetchBatch();
+      return;
     }
-  }, [prefetchedCards.length, wordsQueue.length, isFetching, fetchBatch, cardPool, initialWords]);
-
-  // Timer logic
-  useEffect(() => {
-    let timer: number;
-    const isWaitingForAPI = isTurnActive && !currentCard && (isFetching || wordsQueue.length > 0);
-    
-    if (isTurnActive && timeRemaining > 0 && !isWaitingForAPI) {
-      timer = window.setInterval(() => {
-        setTimeRemaining(prev => prev - 1);
-      }, 1000);
-    } else if (isTurnActive && timeRemaining === 0) {
-      setIsTurnActive(false);
-      playBuzzer(audioAssets);
-      
-      const { turnScore: finalScore, missedCards: finalMissed } = turnStateRef.current;
-      
-      setTeams(prevTeams => {
-        const newTeams = [...prevTeams];
-        newTeams[currentTeamIndex].score += finalScore;
-        return newTeams;
+    if (pool.length > 0) {
+      setQueue((prev) => {
+        if (prev.length >= 3) return prev;
+        const inQueue = new Set(prev.map((c) => norm(c.targetWord)));
+        const available = pool.filter((c) => !inQueue.has(norm(c.targetWord)));
+        return [...prev, ...shuffleArray(available.length ? available : pool)];
       });
-
-      let allMissed = [...finalMissed];
-      if (prefetchedCardsRef.current.length > 0) {
-        const cardOnScreen = prefetchedCardsRef.current[0];
-        if (cardOnScreen) {
-          allMissed.push(cardOnScreen);
-        }
-        // Remove it from queue
-        setPrefetchedCards(prev => prev.slice(1));
-      }
-      
-      // Deduplicate allMissed by targetWord
-      const uniqueMissed: QuestionData[] = [];
-      const seenWords = new Set<string>();
-      for (const card of allMissed) {
-        if (!card || !card.targetWord) continue;
-        const normalized = card.targetWord.trim().toLowerCase();
-        if (!seenWords.has(normalized)) {
-          seenWords.add(normalized);
-          uniqueMissed.push(card);
-        }
-      }
-
-      setMissedCards(uniqueMissed);
-
-      if (uniqueMissed.length > 0) {
-        setIsStealPhase(true);
-      } else {
-        setIsTurnOver(true);
-      }
     }
-    return () => clearInterval(timer);
-  }, [isTurnActive, timeRemaining, currentTeamIndex, audioAssets, currentCard, wordsQueue.length, isFetching]);
+  }, [queue.length, wordsQueue.length, generationStopped, isFetching, fetchBatch, pool]);
 
+  /* ---------- Chrono ---------- */
+  const waitingForCards = phase === 'playing' && !currentCard;
+  useEffect(() => {
+    if (phase !== 'playing' || waitingForCards || timeRemaining <= 0) return;
+    const t = window.setTimeout(() => {
+      setTimeRemaining((s) => s - 1);
+      if (timeRemaining <= 6 && timeRemaining > 1) playTick();
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [phase, waitingForCards, timeRemaining]);
+
+  const endTurn = useCallback(() => {
+    playBuzzer(audioAssets);
+    const onScreen = queue[0];
+    const missed = [...turnMissed];
+    if (onScreen && !missed.some((c) => norm(c.targetWord) === norm(onScreen.targetWord))) missed.push(onScreen);
+    if (onScreen) setQueue((prev) => prev.slice(1));
+    setTurnMissed(missed);
+    setTeams((prev) => prev.map((t, i) => (i === currentTeamIndex ? { ...t, score: t.score + turnScore } : t)));
+    setGameMissed((prev) => {
+      const known = new Set(prev.map((c) => norm(c.targetWord)));
+      return [...prev, ...missed.filter((c) => !known.has(norm(c.targetWord)))];
+    });
+    if (onScreen) setPlayed((p) => [...p, onScreen]);
+    setPhase(missed.length > 0 ? 'review' : 'turnEnd');
+  }, [audioAssets, queue, turnMissed, currentTeamIndex, turnScore]);
+
+  useEffect(() => {
+    if (phase === 'playing' && timeRemaining <= 0) endTurn();
+  }, [phase, timeRemaining, endTurn]);
+
+  /* ---------- Actions ---------- */
   const startTurn = () => {
     setTurnScore(0);
-    setTimeRemaining(TURN_DURATION);
-    setIsTurnOver(false);
-    setIsStealPhase(false);
-    setMissedCards([]);
-    setIsTurnActive(true);
+    setTurnMissed([]);
+    setTimeRemaining(turnDuration);
+    setPhase('playing');
   };
 
-  const handleAction = (points: number) => {
-    const card = prefetchedCards[0];
-    if (!card) return;
+  const handleAction = useCallback(
+    (points: number) => {
+      const card = queue[0];
+      if (phase !== 'playing' || !card) return;
+      if (points > 0) playSuccess(audioAssets);
+      else if (points < 0) playBuzzer(audioAssets);
+      if (points <= 0) {
+        setTurnMissed((m) => (m.some((c) => norm(c.targetWord) === norm(card.targetWord)) ? m : [...m, card]));
+      }
+      setPlayed((p) => [...p, card]);
+      setQueue((prev) => prev.slice(1));
+      setTurnScore((s) => s + points);
+    },
+    [queue, phase, audioAssets],
+  );
 
-    if (points > 0) playSuccess(audioAssets);
-    else if (points < 0) playBuzzer(audioAssets);
-    
-    if (points <= 0) {
-      setMissedCards(m => {
-        if (m.some(c => c.targetWord.trim().toLowerCase() === card.targetWord.trim().toLowerCase())) {
-          return m;
-        }
-        return [...m, card];
-      });
-    }
-
-    setPrefetchedCards(prev => prev.slice(1));
-    setTurnScore(prev => prev + points);
-  };
-
-  const handleAdjustScore = (teamIndex: number, delta: number) => {
+  const adjustScore = (teamIndex: number, delta: number) => {
     if (delta > 0) playSuccess(audioAssets);
-    else if (delta < 0) playBuzzer(audioAssets);
-    
-    setTeams(prev => {
-      const newTeams = [...prev];
-      newTeams[teamIndex].score += delta;
-      return newTeams;
-    });
+    else playBuzzer(audioAssets);
+    setTeams((prev) => prev.map((t, i) => (i === teamIndex ? { ...t, score: t.score + delta } : t)));
   };
 
   const nextTeam = () => {
-    setCurrentTeamIndex(prev => (prev + 1) % teams.length);
-    setIsTurnOver(false);
+    setCurrentTeamIndex((i) => (i + 1) % teams.length);
+    setPhase('ready');
   };
 
-  const formatTime = (seconds: number) => {
-    const m = Math.floor(seconds / 60);
-    const s = seconds % 60;
-    return `${m}:${s.toString().padStart(2, '0')}`;
+  const finishGame = () => {
+    if (phase === 'playing' && !window.confirm('Le tour est en cours. Terminer la partie maintenant ?')) return;
+    onEnd(teams, gameMissed, played);
   };
+
+  const retryGeneration = () => {
+    setFailures(0);
+    setApiError(null);
+  };
+
+  /* ---------- Clavier : Espace = trouvé, X = tabou, P = passer ---------- */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (phase === 'playing') {
+        if (e.code === 'Space' || e.key === 'Enter') { e.preventDefault(); handleAction(1); }
+        else if (e.key.toLowerCase() === 'x') { e.preventDefault(); handleAction(-1); }
+        else if (e.key.toLowerCase() === 'p' || e.key === 'ArrowRight') { e.preventDefault(); handleAction(0); }
+      } else if (phase === 'ready' && (e.code === 'Space' || e.key === 'Enter') && currentCard) {
+        e.preventDefault();
+        startTurn();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
+  /* ---------- Plein écran ---------- */
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    else document.documentElement.requestFullscreen?.().catch(() => {});
+  };
+
+  /* ---------- Rendu ---------- */
+  const scoreboard = (
+    <div className="flex flex-wrap justify-center gap-2">
+      {teams.map((t, i) => (
+        <div
+          key={t.id}
+          className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm transition-colors ${
+            i === currentTeamIndex ? 'border-cream/60 bg-cream/15 text-cream' : 'border-cream/15 text-cream/70'
+          }`}
+        >
+          <span className="h-2.5 w-2.5 rounded-full" style={{ background: t.color }} />
+          <span className="font-bold">{t.name}</span>
+          <span className="font-mono">{t.score}</span>
+        </div>
+      ))}
+    </div>
+  );
 
   return (
-    <div className="flex flex-col min-h-screen bg-slate-900 font-sans relative overflow-hidden">
-      
-      {/* Top Header */}
-      <div className="flex justify-between items-center p-3 px-6 bg-slate-800/80 backdrop-blur-sm border-b border-white/10 z-10">
-        <div className="flex items-center gap-4">
-          <div className="text-xl font-bold text-blue-400">
-            {currentTeam.name}
-          </div>
-          <div className="text-base text-slate-400">
-            Score total: <span className="text-white font-mono font-bold">{currentTeam.score} pts</span>
-          </div>
-        </div>
-        
-        {/* End Game Manual Button */}
-        <button 
-          onClick={() => onEnd(teams)}
-          className="px-3 py-1.5 bg-slate-700/50 text-slate-300 hover:text-white rounded-lg transition-colors text-sm"
-        >
-          Terminer la partie
+    <div className="flex min-h-screen flex-col bg-deep text-cream">
+      {!isFullscreen && (
+        <SiteHeader>
+          <button onClick={toggleFullscreen} className="hidden items-center gap-2 rounded-xl border border-line bg-white px-3 py-2 text-sm font-bold text-ink hover:border-ink sm:inline-flex">
+            <Expand size={16} /> Plein écran
+          </button>
+          <button onClick={finishGame} className="inline-flex items-center gap-2 rounded-xl border border-line bg-white px-3 py-2 text-sm font-bold text-ink hover:border-ink">
+            <Flag size={16} /> Terminer
+          </button>
+        </SiteHeader>
+      )}
+      {isFullscreen && (
+        <button onClick={toggleFullscreen} className="fixed right-4 top-4 z-40 rounded-xl bg-cream/10 p-2 text-cream hover:bg-cream/20" aria-label="Quitter le plein écran">
+          <Shrink size={20} />
         </button>
-      </div>
+      )}
 
-      <div className="flex-1 flex flex-col items-center justify-center p-6 relative z-10">
-        
-        {!isTurnActive && !isTurnOver && !isStealPhase && (
-          <motion.div 
-            initial={{ scale: 0.9, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            className="flex flex-col items-center bg-slate-800 p-12 rounded-3xl border border-blue-500/20 shadow-2xl max-w-lg w-full text-center"
-          >
-            <Users size={64} className="text-blue-500 mb-6" />
-            <h2 className="text-3xl font-bold text-white mb-2">Au tour de : {currentTeam.name}</h2>
-            <p className="text-slate-400 mb-8">Un joueur fait deviner à son équipe. Préparez-vous !</p>
-            
-            <button 
+      <div className="border-b border-cream/10 bg-deeper/60 px-4 py-3">{scoreboard}</div>
+
+      <main className="flex flex-1 flex-col items-center justify-center px-4 py-6 sm:px-6">
+        {/* Avant le tour */}
+        {phase === 'ready' && (
+          <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="w-full max-w-lg rounded-3xl bg-cream p-8 text-center text-ink shadow-2xl sm:p-12">
+            <span className="mx-auto mb-5 block h-4 w-4 rounded-full" style={{ background: currentTeam.color }} />
+            <p className="text-sm font-bold uppercase tracking-[0.14em] text-muted">Au tour de</p>
+            <h2 className="mt-1 font-serif text-4xl font-bold sm:text-5xl">{currentTeam.name}</h2>
+            <p className="mt-4 text-muted">Un joueur fait deviner les mots à son équipe sans dire les mots interdits. Vous avez {turnDuration} secondes.</p>
+            <button
               onClick={startTurn}
-              disabled={prefetchedCards.length === 0 && isFetching}
-              className="flex items-center gap-3 px-8 py-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xl rounded-2xl shadow-lg transition-transform active:scale-95 disabled:opacity-50"
+              disabled={!currentCard}
+              className="mt-8 inline-flex items-center gap-3 rounded-2xl bg-accent px-8 py-4 text-xl font-bold text-white shadow-lg transition-colors hover:bg-accent-dark active:scale-95 disabled:opacity-50"
             >
-              {prefetchedCards.length === 0 && isFetching ? (
-                <span className="animate-pulse">Chargement des cartes...</span>
+              {currentCard ? (
+                <><Play size={22} fill="currentColor" /> Démarrer le chrono</>
+              ) : generationStopped ? (
+                'Aucune carte disponible'
               ) : (
-                <>
-                  <Play size={24} />
-                  Démarrer le chrono
-                </>
+                <span className="animate-pulse">Préparation des cartes…</span>
               )}
             </button>
-            <div className="mt-6 text-sm text-slate-500">
-              Cartes en réserve : {prefetchedCards.length}
-            </div>
+            <p className="mt-4 text-xs text-muted">
+              <kbd>Espace</kbd> pour démarrer · {queue.length} carte{queue.length > 1 ? 's' : ''} prête{queue.length > 1 ? 's' : ''}
+              {wordsQueue.length > 0 && !generationStopped && ` · ${wordsQueue.length} en préparation`}
+            </p>
+            {apiError && generationStopped && wordsQueue.length > 0 && (
+              <div className="mt-4 rounded-xl bg-bad/10 p-3 text-left text-sm text-bad">
+                <strong>Gemini n’a pas pu préparer les cartes.</strong> {apiError}{' '}
+                {queue.length > 0 ? 'La partie continue avec les cartes déjà prêtes.' : 'Aucune carte n’est prête : corrigez la clé ou importez des cartes.'}
+                <button onClick={retryGeneration} className="ml-2 inline-flex items-center gap-1 font-bold underline"><RotateCw size={14} /> Réessayer</button>
+              </div>
+            )}
           </motion.div>
         )}
 
-        {isTurnActive && (
-          <div className="w-full max-w-4xl flex flex-col items-center h-full pt-4">
-            {/* Timer and Live Score */}
-            <div className="flex justify-between w-full mb-6 items-end px-4">
-              <div className="flex flex-col">
-                <span className="text-sm text-slate-400 uppercase tracking-widest mb-1">Score du tour</span>
-                <span className="text-4xl font-mono font-bold text-emerald-400">{turnScore}</span>
-              </div>
-              
-              <div className="flex flex-col items-center">
-                <div className={`text-5xl font-mono font-bold ${timeRemaining <= 10 ? 'text-red-500 animate-pulse' : 'text-blue-400'}`}>
-                  {formatTime(timeRemaining)}
+        {/* Pendant le tour */}
+        {phase === 'playing' && (
+          <div className="flex w-full max-w-5xl flex-col items-center gap-5">
+            <div className="flex w-full items-center justify-between gap-4">
+              <div>
+                <div className="text-xs font-bold uppercase tracking-[0.14em] text-cream/60">Score du tour</div>
+                <div className={`font-mono text-4xl font-bold sm:text-5xl ${turnScore < 0 ? 'text-[#f5a779]' : 'text-mint'}`}>
+                  {turnScore > 0 ? '+' : ''}{turnScore}
                 </div>
               </div>
-              
-              <div className="flex flex-col items-end">
-                <span className="text-sm text-slate-400 uppercase tracking-widest mb-1">Équipe</span>
-                <span className="text-2xl font-bold text-slate-200">{currentTeam.name}</span>
+              <TimerRing remaining={timeRemaining} total={turnDuration} />
+              <div className="hidden text-right sm:block">
+                <div className="text-xs font-bold uppercase tracking-[0.14em] text-cream/60">Équipe</div>
+                <div className="flex items-center justify-end gap-2 font-serif text-xl font-bold sm:text-2xl">
+                  <span className="h-3 w-3 rounded-full" style={{ background: currentTeam.color }} />
+                  {currentTeam.name}
+                </div>
               </div>
             </div>
 
-            <div className="flex w-full gap-6 items-stretch mb-4 min-h-[400px]">
-              {/* The Taboo Card */}
-              <div className="flex-1 relative">
+            <div className="flex w-full flex-col gap-4 md:flex-row md:items-stretch">
+              {/* La carte */}
+              <div className="relative flex min-h-[360px] flex-1 [perspective:1200px] sm:min-h-[420px]">
                 <AnimatePresence mode="wait">
                   {currentCard ? (
-                    <motion.div 
-                      key={currentCard.targetWord}
-                      initial={{ x: 50, opacity: 0 }}
-                      animate={{ x: 0, opacity: 1 }}
-                      exit={{ x: -50, opacity: 0 }}
-                      className="bg-white rounded-3xl p-8 w-full shadow-2xl flex flex-col items-center absolute inset-0 overflow-hidden"
+                    <motion.article
+                      key={currentCard.targetWord + played.length}
+                      initial={{ rotateY: -70, opacity: 0 }}
+                      animate={{ rotateY: 0, opacity: 1 }}
+                      exit={{ rotateY: 70, opacity: 0 }}
+                      transition={{ duration: 0.22 }}
+                      className="flex w-full flex-col overflow-hidden rounded-3xl border-[6px] border-accent bg-cream text-ink shadow-2xl"
                     >
-                      {/* Target Word */}
-                      <div className="bg-blue-600 w-[120%] -mt-8 py-6 mb-8 flex justify-center shadow-md">
-                        <h2 className="text-4xl font-extrabold text-white tracking-tight uppercase">
+                      <div className="bg-deep px-6 py-5 text-center sm:py-7">
+                        <div className="text-[11px] font-bold uppercase tracking-[0.2em] text-mint/80">Faites deviner</div>
+                        <h2 className="mt-2 break-words font-serif text-4xl font-bold leading-tight text-cream sm:text-5xl lg:text-6xl">
                           {currentCard.targetWord}
                         </h2>
                       </div>
-                      
-                      {/* Taboo Words */}
-                      <div className="grid grid-cols-2 gap-4 w-full px-2 flex-1">
-                        {currentCard.tabooWords.map((word, idx) => (
-                          <div key={idx} className="bg-slate-100 rounded-xl p-3 text-center flex items-center justify-center">
-                            <span className="text-xl font-bold text-slate-800">{word}</span>
-                          </div>
-                        ))}
+                      <div className="flex items-center justify-center gap-2 border-b border-line py-2 text-[11px] font-bold uppercase tracking-[0.2em] text-bad">
+                        <Ban size={14} /> Mots interdits
                       </div>
-                    </motion.div>
+                      <ul className="flex flex-1 flex-col justify-evenly px-6 py-3">
+                        {currentCard.tabooWords.map((w, i) => (
+                          <li key={i} className="border-b border-dashed border-line py-1.5 text-center text-2xl font-bold last:border-0 sm:text-3xl">
+                            {w}
+                          </li>
+                        ))}
+                      </ul>
+                    </motion.article>
                   ) : (
-                    <div className="flex flex-col items-center justify-center text-slate-400 text-xl w-full h-full absolute inset-0 border-2 border-dashed border-slate-700 rounded-3xl p-8 text-center">
+                    <div className="flex w-full flex-col items-center justify-center rounded-3xl border-2 border-dashed border-cream/25 p-8 text-center">
                       {apiError ? (
                         <>
-                          <span className="text-red-400 font-bold mb-2">Erreur de connexion avec l'IA.</span>
-                          <span className="text-xs text-red-300 mb-4 max-h-32 overflow-y-auto w-full break-words text-left p-2 bg-red-950/30 rounded">{apiError}</span>
-                          <span className="text-sm">Génération en pause. Veuillez attendre quelques instants avant de réessayer.</span>
+                          <span className="font-bold text-[#f5a779]">La génération des cartes a échoué.</span>
+                          <span className="mt-2 max-h-32 w-full overflow-y-auto break-words rounded bg-black/20 p-2 text-left text-xs text-cream/80">{apiError}</span>
+                          {generationStopped ? (
+                            <button onClick={retryGeneration} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-cream px-4 py-2 font-bold text-ink"><RotateCw size={16} /> Réessayer</button>
+                          ) : (
+                            <span className="mt-3 text-sm text-cream/70">Nouvel essai dans quelques secondes… Le chrono est en pause.</span>
+                          )}
                         </>
-                      ) : isFetching ? (
-                        <span>Génération des cartes en cours...</span>
                       ) : (
-                        <span>Plus de mots disponibles...</span>
+                        <span className="animate-pulse text-cream/80">Préparation des cartes… Le chrono est en pause.</span>
                       )}
                     </div>
                   )}
                 </AnimatePresence>
               </div>
 
-              {/* Controls */}
-              <div className="w-48 flex flex-col gap-4 shrink-0">
-                <button 
-                  onClick={() => handleAction(1)}
-                  className="flex-1 flex flex-col items-center justify-center gap-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 border border-emerald-500/50 rounded-2xl p-4 transition-colors active:scale-95"
-                >
-                  <CheckCircle2 size={32} />
-                  <span className="font-bold">Trouvé ! (+1)</span>
+              {/* Boutons : sous la carte sur téléphone, à côté sur grand écran */}
+              <div className="grid grid-cols-3 gap-3 md:w-52 md:grid-cols-1">
+                <button onClick={() => handleAction(1)} disabled={!currentCard} className="flex flex-col items-center justify-center gap-1.5 rounded-2xl bg-good px-2 py-4 font-bold text-white shadow-lg transition-transform hover:brightness-110 active:scale-95 disabled:opacity-40 md:flex-1">
+                  <CheckCircle2 size={30} />
+                  <span>Trouvé ! +1</span>
+                  <kbd className="hidden md:inline">Espace</kbd>
                 </button>
-                
-                <button 
-                  onClick={() => handleAction(-1)}
-                  className="flex-1 flex flex-col items-center justify-center gap-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-500/50 rounded-2xl p-4 transition-colors active:scale-95"
-                >
-                  <AlertTriangle size={32} />
-                  <span className="font-bold">Mot Tabou (-1)</span>
+                <button onClick={() => handleAction(-1)} disabled={!currentCard} className="flex flex-col items-center justify-center gap-1.5 rounded-2xl bg-bad px-2 py-4 font-bold text-white shadow-lg transition-transform hover:brightness-110 active:scale-95 disabled:opacity-40 md:flex-1">
+                  <Ban size={30} />
+                  <span>Tabou ! −1</span>
+                  <kbd className="hidden md:inline">X</kbd>
                 </button>
-                
-                <button 
-                  onClick={() => handleAction(0)}
-                  className="flex-1 flex flex-col items-center justify-center gap-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-2xl p-4 transition-colors active:scale-95"
-                >
-                  <SkipForward size={32} />
-                  <span className="font-bold">Passer (0)</span>
+                <button onClick={() => handleAction(0)} disabled={!currentCard} className="flex flex-col items-center justify-center gap-1.5 rounded-2xl bg-cream/10 px-2 py-4 font-bold text-cream transition-transform hover:bg-cream/20 active:scale-95 disabled:opacity-40 md:flex-1">
+                  <SkipForward size={30} />
+                  <span>Passer 0</span>
+                  <kbd className="hidden md:inline">P</kbd>
                 </button>
               </div>
             </div>
-            
           </div>
         )}
 
-        {isStealPhase && (
-          <div className="w-full max-w-4xl flex flex-col items-center h-full pt-4">
-            <h2 className="text-3xl font-bold text-white mb-2 text-center">Mots non trouvés</h2>
-            <p className="text-slate-400 mb-8 text-center">L'animateur attribue les points aux équipes qui ont récupéré les mots.</p>
-            
-            <div className="bg-white rounded-3xl p-8 w-full max-w-3xl shadow-2xl flex flex-col items-center relative mb-8">
-              <div className="flex flex-wrap justify-center gap-4 w-full">
-                {missedCards
-                  .filter((card, index, self) =>
-                    index === self.findIndex(c => c.targetWord.trim().toLowerCase() === card.targetWord.trim().toLowerCase())
-                  )
-                  .map((card, idx) => (
-                    <div key={card.targetWord + '-' + idx} className="bg-blue-100 text-blue-900 border border-blue-300 rounded-xl px-6 py-3 text-2xl font-bold uppercase shadow-sm">
-                      {card.targetWord}
+        {/* Mots non trouvés : récupération par les autres équipes */}
+        {phase === 'review' && (
+          <div className="flex w-full max-w-3xl flex-col items-center">
+            <h2 className="text-center font-serif text-3xl font-bold sm:text-4xl">Temps écoulé !</h2>
+            <p className="mt-2 text-center text-cream/75">
+              {currentTeam.name} marque <strong className="text-cream">{turnScore > 0 ? '+' : ''}{turnScore} pt{Math.abs(turnScore) > 1 ? 's' : ''}</strong>.
+              {teams.length > 1 ? ' Les autres équipes peuvent récupérer les mots non trouvés.' : ' Voici les mots non trouvés.'}
+            </p>
+            <div className="mt-6 flex w-full flex-wrap justify-center gap-2 rounded-3xl bg-cream p-5 text-ink sm:p-7">
+              {turnMissed.map((c) => (
+                <span key={c.targetWord} className="rounded-xl border border-line bg-white px-4 py-2 font-serif text-xl font-bold sm:text-2xl">
+                  {c.targetWord}
+                </span>
+              ))}
+            </div>
+            {teams.length > 1 && (
+              <div className="mt-6 grid w-full gap-3 sm:grid-cols-2">
+                {teams.map((team, idx) =>
+                  idx === currentTeamIndex ? null : (
+                    <div key={team.id} className="flex items-center justify-between gap-2 rounded-2xl bg-cream/10 p-3">
+                      <button onClick={() => adjustScore(idx, -1)} className="grid h-12 w-12 place-items-center rounded-xl bg-bad/80 text-2xl font-bold text-white active:scale-95" aria-label={`Retirer un point à ${team.name}`}>−</button>
+                      <div className="flex flex-col items-center">
+                        <span className="flex items-center gap-2 font-bold"><span className="h-2.5 w-2.5 rounded-full" style={{ background: team.color }} />{team.name}</span>
+                        <span className="font-mono text-lg">{team.score} pts</span>
+                      </div>
+                      <button onClick={() => adjustScore(idx, 1)} className="grid h-12 w-12 place-items-center rounded-xl bg-good text-2xl font-bold text-white active:scale-95" aria-label={`Ajouter un point à ${team.name}`}>+</button>
                     </div>
-                  ))}
+                  ),
+                )}
               </div>
-            </div>
-
-            <div className="flex flex-col gap-4 w-full max-w-xl">
-              {teams.map((team, idx) => {
-                if (idx === currentTeamIndex) return null; // Active team cannot steal
-                return (
-                  <div key={team.id} className="flex items-center justify-between bg-slate-800 border border-slate-700 p-4 rounded-2xl">
-                    <button 
-                      onClick={() => handleAdjustScore(idx, -1)}
-                      className="w-16 h-16 flex items-center justify-center bg-red-500/20 text-red-400 hover:bg-red-500/30 rounded-xl font-bold text-4xl active:scale-95 transition-transform"
-                    >-</button>
-                    <div className="flex flex-col items-center flex-1">
-                      <span className="text-2xl font-bold text-white">{team.name}</span>
-                      <span className="text-slate-400 font-mono text-xl">{team.score} pts</span>
-                    </div>
-                    <button 
-                      onClick={() => handleAdjustScore(idx, 1)}
-                      className="w-16 h-16 flex items-center justify-center bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 rounded-xl font-bold text-4xl active:scale-95 transition-transform"
-                    >+</button>
-                  </div>
-                );
-              })}
-            </div>
-            
-            <button
-              onClick={() => {
-                setIsStealPhase(false);
-                setIsTurnOver(true);
-              }}
-              className="mt-8 px-8 py-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xl rounded-2xl shadow-lg transition-transform active:scale-95"
-            >
-              Terminer la phase de récupération
+            )}
+            <button onClick={() => setPhase('turnEnd')} className="mt-8 rounded-2xl bg-accent px-8 py-4 text-lg font-bold text-white shadow-lg hover:bg-accent-dark active:scale-95">
+              Continuer
             </button>
           </div>
         )}
 
-        {isTurnOver && (
-          <motion.div 
-            initial={{ scale: 0.9, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            className="flex flex-col items-center bg-slate-800 p-12 rounded-3xl border border-blue-500/20 shadow-2xl max-w-lg w-full text-center"
-          >
-            <h2 className="text-4xl font-extrabold text-white mb-2">Temps écoulé !</h2>
-            <div className="text-6xl font-mono font-bold text-emerald-400 my-8">
+        {/* Fin du tour */}
+        {phase === 'turnEnd' && (
+          <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="w-full max-w-lg rounded-3xl bg-cream p-8 text-center text-ink shadow-2xl sm:p-12">
+            <p className="text-sm font-bold uppercase tracking-[0.14em] text-muted">Fin du tour · {currentTeam.name}</p>
+            <div className={`my-6 font-mono text-6xl font-bold ${turnScore < 0 ? 'text-bad' : 'text-good'}`}>
               {turnScore > 0 ? '+' : ''}{turnScore} pt{Math.abs(turnScore) > 1 ? 's' : ''}
             </div>
-            <p className="text-xl text-slate-300 mb-8">
-              Nouveau score : <span className="font-bold text-white">{currentTeam.score}</span>
+            <p className="text-lg text-muted">
+              Total : <strong className="text-ink">{currentTeam.score} pt{Math.abs(currentTeam.score) > 1 ? 's' : ''}</strong>
             </p>
-            
-            <button 
-              onClick={nextTeam}
-              className="w-full py-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xl rounded-2xl shadow-lg transition-transform active:scale-95"
-            >
-              Tour suivant
+            <button onClick={nextTeam} className="mt-8 w-full rounded-2xl bg-deep py-4 text-xl font-bold text-cream hover:bg-deeper active:scale-95">
+              {teams.length > 1 ? `Au tour de ${teams[(currentTeamIndex + 1) % teams.length].name}` : 'Tour suivant'}
             </button>
           </motion.div>
         )}
-
-      </div>
+      </main>
     </div>
   );
 }
