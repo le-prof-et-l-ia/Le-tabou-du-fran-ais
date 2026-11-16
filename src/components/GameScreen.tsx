@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import { Ban, CheckCircle2, Expand, Flag, Play, RotateCw, Shrink, SkipForward } from 'lucide-react';
 import { AudioAssets, GameConfig, QuestionData, Team } from '../types';
 import { norm, shuffleArray } from '../lib/cards';
+import type { GenerationProgress } from '../lib/gemini';
 import SiteHeader from './SiteHeader';
 
 interface GameScreenProps {
@@ -12,7 +13,12 @@ interface GameScreenProps {
 
 type TurnPhase = 'ready' | 'playing' | 'review' | 'turnEnd';
 
-const BATCH_SIZE = 20;
+/** Premier lot volontairement petit : la partie peut démarrer en quelques secondes. */
+const FIRST_BATCH_SIZE = 5;
+/** Lots suivants, préparés en arrière-plan pendant le jeu. */
+const BATCH_SIZE = 10;
+/** On relance la génération dès qu'il reste moins de cartes que ce seuil. */
+const PREFETCH_THRESHOLD = 6;
 const MAX_FAILURES = 3;
 
 /* ---------- Sons ---------- */
@@ -80,6 +86,9 @@ export default function GameScreen({ config, onEnd }: GameScreenProps) {
   const [isFetching, setIsFetching] = useState(false);
   const [failures, setFailures] = useState(0);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<GenerationProgress | null>(null);
+  const [fetchStartedAt, setFetchStartedAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const fetchingRef = useRef(false);
 
   const [phase, setPhase] = useState<TurnPhase>('ready');
@@ -117,12 +126,13 @@ export default function GameScreen({ config, onEnd }: GameScreenProps) {
     if (fetchingRef.current || wordsQueue.length === 0 || generationStopped) return;
     fetchingRef.current = true;
     setIsFetching(true);
-    setApiError(null);
-    const targetWords = wordsQueue.slice(0, BATCH_SIZE);
+    setProgress(null);
+    setFetchStartedAt(Date.now());
+    const targetWords = wordsQueue.slice(0, pool.length === 0 ? FIRST_BATCH_SIZE : BATCH_SIZE);
     try {
       // Le SDK Gemini n'est chargé que si l'on génère des cartes.
       const { generateTabooBatch } = await import('../lib/gemini');
-      const cards = await generateTabooBatch(targetWords, level, apiKeys);
+      const cards = await generateTabooBatch(targetWords, level, apiKeys, setProgress);
       setPool((prev) => {
         const known = new Set(prev.map((c) => norm(c.targetWord)));
         return [...prev, ...cards.filter((c) => !known.has(norm(c.targetWord)))];
@@ -133,6 +143,7 @@ export default function GameScreen({ config, onEnd }: GameScreenProps) {
       });
       setWordsQueue((prev) => prev.slice(targetWords.length));
       setFailures(0);
+      setApiError(null);
     } catch (error: any) {
       console.error(error);
       setApiError(error?.message || 'Erreur de connexion');
@@ -141,16 +152,19 @@ export default function GameScreen({ config, onEnd }: GameScreenProps) {
     } finally {
       fetchingRef.current = false;
       setIsFetching(false);
+      setProgress(null);
+      setFetchStartedAt(null);
     }
-  }, [wordsQueue, generationStopped, level, apiKeys]);
+  }, [wordsQueue, generationStopped, level, apiKeys, pool.length]);
 
   // Réapprovisionne la file : d'abord Gemini, sinon on recycle les cartes déjà jouées.
+  // La génération est lancée à l'avance pour que la file ne se vide pas en plein tour.
   useEffect(() => {
-    if (queue.length >= 3) return;
     if (wordsQueue.length > 0 && !generationStopped) {
-      if (!isFetching) fetchBatch();
+      if (queue.length < PREFETCH_THRESHOLD && !isFetching) fetchBatch();
       return;
     }
+    if (queue.length >= 3) return;
     if (pool.length > 0) {
       setQueue((prev) => {
         if (prev.length >= 3) return prev;
@@ -160,6 +174,26 @@ export default function GameScreen({ config, onEnd }: GameScreenProps) {
       });
     }
   }, [queue.length, wordsQueue.length, generationStopped, isFetching, fetchBatch, pool]);
+
+  /* ---------- État de la génération, affiché pendant l'attente ---------- */
+  const waitingForGeneration = !currentCard && !generationStopped && wordsQueue.length > 0;
+  useEffect(() => {
+    if (!waitingForGeneration || !isFetching) return;
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [waitingForGeneration, isFetching]);
+  const elapsed = fetchStartedAt ? Math.max(0, Math.round((now - fetchStartedAt) / 1000)) : 0;
+  let generationStatus = 'Gemini prépare les cartes…';
+  if (isFetching && failures > 0) {
+    generationStatus = `Nouvel essai (${failures + 1} sur ${MAX_FAILURES}) après : ${apiError ?? 'erreur inconnue'}`;
+  } else if (isFetching && progress && progress.attempt > 1) {
+    generationStatus = `Gemini tarde à répondre : essai d’un autre modèle (n° ${progress.attempt})…`;
+  } else if (isFetching && elapsed >= 15) {
+    generationStatus = 'Gemini est lent aujourd’hui, patientez encore un peu…';
+  } else if (!isFetching && failures > 0) {
+    generationStatus = `Échec de la tentative ${failures} sur ${MAX_FAILURES} : ${apiError ?? 'erreur inconnue'} Nouvel essai dans quelques secondes…`;
+  }
+  if (isFetching && elapsed > 0) generationStatus += ` (${elapsed} s)`;
 
   /* ---------- Chrono ---------- */
   const waitingForCards = phase === 'playing' && !currentCard;
@@ -328,6 +362,9 @@ export default function GameScreen({ config, onEnd }: GameScreenProps) {
               <kbd>Espace</kbd> pour démarrer · {queue.length} carte{queue.length > 1 ? 's' : ''} prête{queue.length > 1 ? 's' : ''}
               {wordsQueue.length > 0 && !generationStopped && ` · ${wordsQueue.length} en préparation`}
             </p>
+            {waitingForGeneration && (
+              <p className="mt-2 text-sm text-cream/80" aria-live="polite">{generationStatus}</p>
+            )}
             {apiError && generationStopped && wordsQueue.length > 0 && (
               <div className="mt-4 rounded-xl bg-bad/10 p-3 text-left text-sm text-bad">
                 <strong>Gemini n’a pas pu préparer les cartes.</strong> {apiError}{' '}
@@ -401,7 +438,10 @@ export default function GameScreen({ config, onEnd }: GameScreenProps) {
                           )}
                         </>
                       ) : (
-                        <span className="animate-pulse text-cream/80">Préparation des cartes… Le chrono est en pause.</span>
+                        <span className="text-cream/80" aria-live="polite">
+                          <span className="animate-pulse">Préparation des cartes… Le chrono est en pause.</span>
+                          {waitingForGeneration && <span className="mt-2 block text-sm text-cream/70">{generationStatus}</span>}
+                        </span>
                       )}
                     </div>
                   )}
