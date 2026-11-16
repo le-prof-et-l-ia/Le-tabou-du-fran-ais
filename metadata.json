@@ -1,0 +1,8 @@
+{
+  "name": "Taboo du Français",
+  "description": "Master French vocabulary with this Taboo style game featuring custom lists and team play.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
